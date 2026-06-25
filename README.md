@@ -13,6 +13,7 @@ it. git ships on the droplet and the repo is public, so just clone and run:
 ```
 git clone https://github.com/digital-brands/dev-server-setup.git
 cd dev-server-setup
+chmod +x server-setup.sh
 ./server-setup.sh
 ```
 
