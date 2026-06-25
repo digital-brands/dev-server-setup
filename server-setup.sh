@@ -15,6 +15,15 @@ if [ ! -t 0 ]; then
     exit 1
 fi
 
+# Refuse to run as the cloud-init 'ubuntu' account: this script deletes that
+# account (and pkills its processes) partway through, which would kill its own
+# session mid-run. Run as root or another sudo-capable user instead.
+if [ "$(id -un)" = "ubuntu" ]; then
+    echo "Don't run this as the 'ubuntu' user — the script removes that account" >&2
+    echo "mid-run and would kill its own session. Log in as root and re-run." >&2
+    exit 1
+fi
+
 # --- Login user + auth method (collected up front; the rest runs unattended) ---
 read -rp "Username for your login account: " LOGIN_USER
 if ! [[ "$LOGIN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
@@ -54,12 +63,51 @@ case "$INSTALL_MOSH_REPLY" in
     *)                 INSTALL_MOSH="no"  ;;
 esac
 
+# nvm is per-user node version management (installs into the login user's
+# ~/.nvm and hooks their shell). We deliberately do NOT install the apt `npm`
+# package — node is nvm-managed for the user to avoid version confusion. Decline
+# only if you don't need node on this box at all.
+read -rp "Install nvm (node version manager) for $LOGIN_USER? [Y/n] " INSTALL_NVM_REPLY
+case "$INSTALL_NVM_REPLY" in
+    [nN]|[nN][oO]) INSTALL_NVM="no"  ;;
+    *)             INSTALL_NVM="yes" ;;
+esac
+
+# GitHub authentication for the login user. Two supported paths:
+#   gh    - install the gh CLI; you run `gh auth login` yourself after first
+#           login (interactive browser/device flow, no token to paste here).
+#   token - paste a Personal Access Token now; we store it via git's credential
+#           helper (~/.git-credentials, chmod 600). No gh needed.
+#   skip  - set nothing up; configure git auth later by hand.
+# This is also what decides whether gh gets installed (see TOOLS below).
+GIT_PAT=""
+GIT_PAT_USER=""
+echo "How should $LOGIN_USER authenticate to GitHub?"
+PS3="Select GitHub auth (number): "
+select GH_AUTH in "gh" "token" "skip"; do
+    [ -n "${GH_AUTH:-}" ] && break
+    echo "Enter 1, 2, or 3."
+done
+[ -n "${GH_AUTH:-}" ] || GH_AUTH="skip"
+
+if [ "$GH_AUTH" = "token" ]; then
+    read -rp "GitHub username: " GIT_PAT_USER
+    # -s: don't echo the token to the terminal.
+    read -rsp "GitHub Personal Access Token (input hidden): " GIT_PAT; echo
+    if [ -z "$GIT_PAT_USER" ] || [ -z "$GIT_PAT" ]; then
+        echo "Username and token are both required for the token method." >&2
+        exit 1
+    fi
+fi
+
 TOOLS=(
-    'git' 'gh' 'htop' 'curl' 'vim' 'zsh' 'tmux' 'build-essential' 'npm' 'certbot' 'direnv'
+    'git' 'htop' 'curl' 'vim' 'zsh' 'tmux' 'build-essential' 'certbot' 'direnv'
     'python3-certbot-dns-cloudflare'
     'ca-certificates' 'gnupg' 'ufw' 'fail2ban'
 )
 [ "$INSTALL_MOSH" = "yes" ] && TOOLS+=('mosh')
+# gh is only needed for the interactive `gh auth login` path.
+[ "$GH_AUTH" = "gh" ] && TOOLS+=('gh')
 
 # Detect Ubuntu codename
 UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
@@ -153,6 +201,68 @@ sudo rm -f /etc/sudoers.d/90-cloud-init-users
 
 # Default the login user to zsh.
 sudo chsh -s "$(command -v zsh)" "$LOGIN_USER"
+
+# Hook direnv into the login user's shells so each site's .envrc loads on `cd`
+# (the per-site secrets/config live there). Idempotent — only appends if absent.
+# Covers zsh (the default above) and bash (fallback / non-login shells).
+for rc in .zshrc .bashrc; do
+    rc_path="/home/$LOGIN_USER/$rc"
+    shell="${rc#.}"; shell="${shell%rc}"   # .zshrc -> zsh, .bashrc -> bash
+    hook="eval \"\$(direnv hook $shell)\""
+    sudo touch "$rc_path"
+    if ! sudo grep -qF "direnv hook $shell" "$rc_path"; then
+        printf '\n# direnv: load per-directory .envrc files\n%s\n' "$hook" \
+            | sudo tee -a "$rc_path" >/dev/null
+    fi
+    sudo chown "$LOGIN_USER:$LOGIN_USER" "$rc_path"
+done
+
+# Install nvm for the login user, if requested. nvm is per-user: its installer
+# drops ~/.nvm and appends its shell hook to the user's rc files. Run the whole
+# thing AS the login user (sudo -iu) so paths/ownership land in their home, not
+# root's. Idempotent: the installer is a no-op re-run, and we only set a default
+# node if none is active yet.
+if [ "$INSTALL_NVM" = "yes" ]; then
+    NVM_VERSION="v0.40.1"
+    sudo -iu "$LOGIN_USER" bash -c "
+        export PROFILE=\$HOME/.bashrc
+        curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh | bash
+        export NVM_DIR=\$HOME/.nvm
+        . \$NVM_DIR/nvm.sh
+        nvm install --lts
+        nvm alias default 'lts/*'
+    "
+    # nvm's installer only hooks .bashrc by default; make sure zsh (our default
+    # shell) loads it too. Idempotent.
+    zrc="/home/$LOGIN_USER/.zshrc"
+    if ! sudo grep -qF 'NVM_DIR' "$zrc" 2>/dev/null; then
+        sudo tee -a "$zrc" >/dev/null <<'EOF'
+
+# nvm: per-user node version management
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
+EOF
+        sudo chown "$LOGIN_USER:$LOGIN_USER" "$zrc"
+    fi
+fi
+
+# Store the GitHub token for the login user, if the token method was chosen.
+# Mirrors the old git-set-credentials.sh but fixed: writes to the LOGIN user's
+# home, 0600, owned by them, and points git's `store` helper at the file. The
+# token is written via a heredoc into a root-run tee so it never lands in the
+# process list. Idempotent: the helper config and credentials file are rewritten
+# cleanly each run.
+if [ "$GH_AUTH" = "token" ]; then
+    cred_file="/home/$LOGIN_USER/.git-credentials"
+    # URL-form credential line consumed by git's store helper.
+    printf 'https://%s:%s@github.com\n' "$GIT_PAT_USER" "$GIT_PAT" \
+        | sudo tee "$cred_file" >/dev/null
+    sudo chmod 600 "$cred_file"
+    sudo chown "$LOGIN_USER:$LOGIN_USER" "$cred_file"
+    # Configure git (as the login user) to use the on-disk credential store.
+    sudo -u "$LOGIN_USER" git config --global credential.helper store
+fi
 
 # Lock the db-admin shell so the service account can't be used for an
 # interactive session (even if a password ever gets set).
@@ -270,5 +380,11 @@ echo "Done on Ubuntu $UBUNTU_VERSION. Verify with:"
 echo "  docker --version"
 echo "  docker compose version"
 echo "  docker-compose version   # compose-switch shim"
-echo "  gh --version"
 echo "  sudo ufw status"
+
+# Point the user at the next step for their chosen GitHub auth method.
+case "$GH_AUTH" in
+    gh)    echo "GitHub: run 'gh auth login' (then 'gh auth setup-git') after you log in as $LOGIN_USER." ;;
+    token) echo "GitHub: token stored for $LOGIN_USER via git's credential helper — HTTPS clones will just work." ;;
+    skip)  echo "GitHub: no auth configured — set it up later with gh or a token." ;;
+esac
