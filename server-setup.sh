@@ -107,8 +107,14 @@ echo "Detected Ubuntu $UBUNTU_VERSION ($UBUNTU_CODENAME)"
 # Patch the base system, then install our tools. DEBIAN_FRONTEND=noninteractive
 # keeps the upgrade from prompting (service restarts, conf-file diffs) and
 # stalling the otherwise-unattended part of this run.
+#
+# full-upgrade (not plain upgrade) so packages whose new version needs to pull
+# in new deps or remove something aren't held back — plain `upgrade` skips
+# those, which is why a fresh box still showed "N updates can be applied" in the
+# login MOTD right after this ran (cloud-init, fwupd, open-vm-tools, kernel ABI
+# bumps, etc.). full-upgrade clears them.
 sudo apt-get update
-sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y
 sudo apt-get install -y "${TOOLS[@]}"
 
 # Remove host packages that conflict with / are unwanted on a Docker host:
@@ -347,3 +353,21 @@ case "$GH_AUTH" in
     token) echo "GitHub: token stored for $LOGIN_USER via git's credential helper — HTTPS clones will just work." ;;
     skip)  echo "GitHub: no auth configured — set it up later with gh or a token." ;;
 esac
+
+# Offer a reboot only if the full-upgrade pulled a new kernel (or other package
+# that set the flag) — /var/run/reboot-required is the standard marker. Default
+# is NO: this prompt fires while we still hold the root session, and rebooting
+# now kills it. Verify you can log in as $LOGIN_USER FIRST (PermitRootLogin is
+# off — if the new login is broken, your only way back is the DO web Console).
+# Decline here, confirm the login, then `sudo reboot` yourself when ready.
+if [ -f /var/run/reboot-required ]; then
+    echo
+    echo "A reboot is required (a new kernel was installed)."
+    echo "Verify you can log in as '$LOGIN_USER' in another terminal BEFORE rebooting —"
+    echo "root login is now disabled, so a broken login means console-only recovery."
+    read -rp "Reboot now? [y/N] " REBOOT_REPLY
+    case "$REBOOT_REPLY" in
+        [yY]|[yY][eE][sS]) echo "Rebooting…"; sudo reboot ;;
+        *) echo "Skipping reboot. Run 'sudo reboot' yourself once the new login is confirmed." ;;
+    esac
+fi
