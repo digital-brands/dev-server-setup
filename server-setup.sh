@@ -1,11 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+# Don't depend on the invocation directory (the clone dir can become unstat-able
+# mid-run after account/ownership changes).
+cd /
+
 # db-admin is a locked service identity for file ownership under /home/sites
 # (see usermod -s nologin below) — never a login.
 SERVICE_USER='db-admin'
-# Working groups for the human login account.
-GROUPS=('sudo' 'www-data' 'db-admin' 'docker')
+# Working groups for the human login account. (Not GROUPS — that's a bash
+# builtin array; assigning to it is ignored.)
+LOGIN_GROUPS=('sudo' 'www-data' 'db-admin' 'docker')
 
 # This script is interactive (asks who the login user is and how they
 # authenticate). Bail early if there's no terminal rather than misbehaving
@@ -105,14 +110,8 @@ UBUNTU_VERSION=$(. /etc/os-release && echo "$VERSION_ID")
 echo "Detected Ubuntu $UBUNTU_VERSION ($UBUNTU_CODENAME)"
 
 # Patch the base system, then install our tools. DEBIAN_FRONTEND=noninteractive
-# keeps the upgrade from prompting (service restarts, conf-file diffs) and
-# stalling the otherwise-unattended part of this run.
-#
-# full-upgrade (not plain upgrade) so packages whose new version needs to pull
-# in new deps or remove something aren't held back — plain `upgrade` skips
-# those, which is why a fresh box still showed "N updates can be applied" in the
-# login MOTD right after this ran (cloud-init, fwupd, open-vm-tools, kernel ABI
-# bumps, etc.). full-upgrade clears them.
+# avoids prompts that would stall the unattended part of the run. full-upgrade
+# (not plain upgrade) so kernel/dep-changing updates aren't held back.
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y
 sudo apt-get install -y "${TOOLS[@]}"
@@ -164,14 +163,15 @@ sudo curl -fL \
 sudo chmod +x /usr/local/bin/docker-compose
 
 # Create groups (skip if they exist)
-for group in "${GROUPS[@]}"; do
+for group in "${LOGIN_GROUPS[@]}"; do
     getent group "$group" >/dev/null || sudo groupadd "$group"
 done
 
 # Create the db-admin service account (file ownership under /home/sites; shell
 # locked below). Only needs its own group plus www-data — no sudo/docker.
+# -g: use the db-admin group created above as its primary group.
 if ! id "$SERVICE_USER" &>/dev/null; then
-    sudo useradd -m -s /bin/bash "$SERVICE_USER"
+    sudo useradd -m -s /bin/bash -g "$SERVICE_USER" "$SERVICE_USER"
 fi
 sudo usermod -aG www-data,db-admin "$SERVICE_USER"
 
@@ -179,7 +179,7 @@ sudo usermod -aG www-data,db-admin "$SERVICE_USER"
 if ! id "$LOGIN_USER" &>/dev/null; then
     sudo useradd -m -s /bin/bash "$LOGIN_USER"
 fi
-for group in "${GROUPS[@]}"; do
+for group in "${LOGIN_GROUPS[@]}"; do
     sudo usermod -aG "$group" "$LOGIN_USER"
 done
 
@@ -354,12 +354,8 @@ case "$GH_AUTH" in
     skip)  echo "GitHub: no auth configured — set it up later with gh or a token." ;;
 esac
 
-# Offer a reboot only if the full-upgrade pulled a new kernel (or other package
-# that set the flag) — /var/run/reboot-required is the standard marker. Default
-# is NO: this prompt fires while we still hold the root session, and rebooting
-# now kills it. Verify you can log in as $LOGIN_USER FIRST (PermitRootLogin is
-# off — if the new login is broken, your only way back is the DO web Console).
-# Decline here, confirm the login, then `sudo reboot` yourself when ready.
+# Offer a reboot if a new kernel was installed. Defaults to NO: root login is
+# disabled now, so the login user must be verified before losing this session.
 if [ -f /var/run/reboot-required ]; then
     echo
     echo "A reboot is required (a new kernel was installed)."
