@@ -173,15 +173,75 @@ site afterward.
 
 ### 2. Cloudflare credentials for certbot
 
-<!-- TODO: cert setup steps -->
+The DNS-01 challenge proves you control the domain by writing a TXT record into
+the Cloudflare zone, so certbot's `dns-cloudflare` plugin needs API credentials.
+It reads them from **`/root/cloudflare.ini`**.
 
-_placeholder_
+You don't normally hand-create that file — `tasks/cert-issue.sh` (step 3)
+generates it (mode `600`, root-owned) on first run from two variables in the
+site's `.envrc`:
+
+```ini
+# .envrc (already present for an existing site; set these if provisioning fresh)
+export CLOUDFLARE_AUTH_EMAIL='...'    # Cloudflare account email
+export CLOUDFLARE_AUTH_KEY='...'      # Cloudflare API key
+```
+
+So the only prep here is making sure those are set and `direnv allow`'d. Because
+certbot runs as root and reads the env to build the file, **issue/renew with
+`sudo -E`** so direnv's vars survive into sudo (the task scripts assume this).
+
+> `/root/cloudflare.ini` is **not** in the repo and isn't provisioned by
+> `server-setup.sh` — it's derived from `.envrc`. On a rebuilt box it's
+> regenerated the next time `cert-issue.sh` runs.
+>
+> The variables above are the Cloudflare **global API key**, which the plugin
+> accepts but which has broad account access. To tighten it, replace the `.ini`
+> with a single `dns_cloudflare_api_token = ...` line scoped to **Zone:DNS:Edit**
+> on just this zone.
 
 ### 3. TLS certificate
 
-<!-- TODO: cert setup steps -->
+The cert is issued **once** with `tasks/cert-issue.sh`; renewals are automatic
+thereafter (cron, below). Issuance uses DNS-01, so it works whether or not the
+hostname is proxied and without port 80 — the A record doesn't even have to
+resolve yet.
 
-_placeholder_
+```
+cd /home/sites/<site>
+sudo -E ./tasks/cert-issue.sh                       # issues for $DOMAIN_DEV
+```
+
+The script obtains the cert via `certbot certonly --dns-cloudflare`, then calls
+`tasks/cert-combine.sh`, which concatenates the Let's Encrypt `fullchain.pem` +
+`privkey.pem` into the `volumes/haproxy/certs/development.pem` that haproxy
+serves in step 6 (on dev it also writes the BrowserSync certs).
+
+**Issuing before DNS is switched.** If the real dev hostname still points
+elsewhere and you want to test on this box first, pass extra hostnames — they're
+added to the cert as SANs while the primary name stays `$DOMAIN_DEV` (so the
+Let's Encrypt lineage dir matches what `cert-combine.sh` expects):
+
+```
+sudo -E ./tasks/cert-issue.sh <temp-host-pointing-here>
+```
+
+The one cert then covers both names: test on the temp host now, flip the real
+A record when ready — no re-issue needed.
+
+**Renewal is hands-off.** `tasks/cert-renew.sh` runs `certbot renew` (a no-op
+until within 30 days of expiry) and is cron'd monthly. A certbot `--deploy-hook`
+re-runs `cert-combine.sh` and restarts haproxy **only when a cert actually
+renews**, so there's no downtime on the months nothing is due. To validate the
+whole pipeline against Let's Encrypt staging without touching rate limits:
+
+```
+sudo certbot renew --dry-run
+```
+
+> First issuance writes `development.pem` as `root` (certbot runs as root).
+> That's expected — `cert-combine.sh` writes it via `sudo cp` so later renewals
+> overwrite it regardless of owner, and haproxy reads it through the bind mount.
 
 ### 4. Database load (monsoon)
 
