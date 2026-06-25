@@ -63,16 +63,6 @@ case "$INSTALL_MOSH_REPLY" in
     *)                 INSTALL_MOSH="no"  ;;
 esac
 
-# nvm is per-user node version management (installs into the login user's
-# ~/.nvm and hooks their shell). We deliberately do NOT install the apt `npm`
-# package — node is nvm-managed for the user to avoid version confusion. Decline
-# only if you don't need node on this box at all.
-read -rp "Install nvm (node version manager) for $LOGIN_USER? [Y/n] " INSTALL_NVM_REPLY
-case "$INSTALL_NVM_REPLY" in
-    [nN]|[nN][oO]) INSTALL_NVM="no"  ;;
-    *)             INSTALL_NVM="yes" ;;
-esac
-
 # GitHub authentication for the login user. Three supported paths:
 #   gh    - install the gh CLI; you run `gh auth login` yourself after first
 #           login (interactive browser/device flow, no token to paste here).
@@ -216,40 +206,6 @@ for rc in .zshrc .bashrc; do
     fi
     sudo chown "$LOGIN_USER:$LOGIN_USER" "$rc_path"
 done
-
-# Install nvm for the login user, if requested. nvm is per-user: its installer
-# drops ~/.nvm and appends its shell hook to the user's rc files. Run the whole
-# thing AS the login user (sudo -iu) so paths/ownership land in their home, not
-# root's. Idempotent: the installer is a no-op re-run, and we only set a default
-# node if none is active yet.
-if [ "$INSTALL_NVM" = "yes" ]; then
-    # Bump periodically: https://github.com/nvm-sh/nvm/releases
-    NVM_VERSION="v0.40.5"
-    # Run as the login user. The body is single-quoted so the OUTER shell leaves
-    # it untouched; NVM_VERSION is passed in as an env var the inner shell reads.
-    # PROFILE points the installer at .bashrc so it appends its hook there.
-    sudo -iu "$LOGIN_USER" NVM_VERSION="$NVM_VERSION" bash -c '
-        export PROFILE="$HOME/.bashrc"
-        curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" | bash
-        export NVM_DIR="$HOME/.nvm"
-        . "$NVM_DIR/nvm.sh"
-        nvm install --lts
-        nvm alias default "lts/*"
-    '
-    # nvm's installer only hooks .bashrc by default; make sure zsh (our default
-    # shell) loads it too. Idempotent.
-    zrc="/home/$LOGIN_USER/.zshrc"
-    if ! sudo grep -qF 'NVM_DIR' "$zrc" 2>/dev/null; then
-        sudo tee -a "$zrc" >/dev/null <<'EOF'
-
-# nvm: per-user node version management
-export NVM_DIR="$HOME/.nvm"
-[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
-[ -s "$NVM_DIR/bash_completion" ] && . "$NVM_DIR/bash_completion"
-EOF
-        sudo chown "$LOGIN_USER:$LOGIN_USER" "$zrc"
-    fi
-fi
 
 # Store the GitHub token for the login user, if the token method was chosen.
 # Mirrors the old git-set-credentials.sh but fixed: writes to the LOGIN user's
