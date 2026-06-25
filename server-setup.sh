@@ -45,20 +45,43 @@ else
     PASSWORD_AUTH="yes"
 fi
 
+# mosh is optional: it's a roaming/latency-tolerant SSH alternative but needs a
+# UDP port range opened in the firewall, so we only install it (and add the UFW
+# rule below) if asked for.
+read -rp "Install mosh (roaming SSH over UDP 60000-61000)? [y/N] " INSTALL_MOSH_REPLY
+case "$INSTALL_MOSH_REPLY" in
+    [yY]|[yY][eE][sS]) INSTALL_MOSH="yes" ;;
+    *)                 INSTALL_MOSH="no"  ;;
+esac
+
 TOOLS=(
-    'git' 'gh' 'htop' 'curl' 'vim' 'zsh' 'build-essential' 'npm' 'certbot' 'direnv'
+    'git' 'gh' 'htop' 'curl' 'vim' 'zsh' 'tmux' 'build-essential' 'npm' 'certbot' 'direnv'
     'python3-certbot-dns-cloudflare'
     'ca-certificates' 'gnupg' 'ufw' 'fail2ban'
 )
+[ "$INSTALL_MOSH" = "yes" ] && TOOLS+=('mosh')
 
 # Detect Ubuntu codename
 UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
 UBUNTU_VERSION=$(. /etc/os-release && echo "$VERSION_ID")
 echo "Detected Ubuntu $UBUNTU_VERSION ($UBUNTU_CODENAME)"
 
-# Install base tools
+# Patch the base system, then install our tools. DEBIAN_FRONTEND=noninteractive
+# keeps the upgrade from prompting (service restarts, conf-file diffs) and
+# stalling the otherwise-unattended part of this run.
 sudo apt-get update
+sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 sudo apt-get install -y "${TOOLS[@]}"
+
+# Remove host packages that conflict with / are unwanted on a Docker host:
+# apache2 & mysql-server would fight for ports 80/443/3306 (no-ops on a clean
+# droplet); snapd is auto-updating bloat we don't need. Guarded with || true so
+# "not installed" doesn't trip set -e.
+for pkg in snapd apache2 mysql-server; do
+    sudo systemctl disable --now "$pkg" 2>/dev/null || true
+    sudo apt-get remove --purge -y "$pkg" 2>/dev/null || true
+done
+sudo apt-get autoremove --purge -y 2>/dev/null || true
 
 # Remove any conflicting Docker packages (safe no-op if not installed)
 for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
@@ -199,17 +222,26 @@ sudo systemctl reload ssh
 # fail2ban: ban brute-force SSH attempts. backend=systemd reads journald
 # (no /var/log/auth.log on 24.04). banaction=ufw drops via UFW so bans
 # stack with our existing firewall policy instead of iptables-direct.
-# Escalating ban time: first offense 10m, repeat offenders 24h.
-# multipliers="1 144" -> ban#1 = 10m*1, ban#2+ = 10m*144 = 24h.
+#
+# Escalating ban times balance "don't lock ourselves out over a fat-fingered
+# password" against "punish a persistent attacker". Multipliers are relative to
+# bantime (the base, 1m here):
+#   ban#1 = 1m*1   = 1 minute   (a quick fumble barely costs anything)
+#   ban#2 = 1m*5   = 5 minutes
+#   ban#3 = 1m*60  = 1 hour
+#   ban#4+ = 1m*1440 = 24 hours (capped by maxtime)
+# maxretry=5 gives human fingers some headroom before the first ban. Recovery if
+# we ever do lock ourselves out: the DigitalOcean web Console is out-of-band
+# (not over SSH), or `fail2ban-client set sshd unbanip <ip>` from there.
 sudo tee /etc/fail2ban/jail.local > /dev/null <<'EOF'
 [DEFAULT]
 backend             = systemd
 banaction           = ufw
-maxretry            = 3
+maxretry            = 5
 findtime            = 10m
-bantime             = 10m
+bantime             = 1m
 bantime.increment   = true
-bantime.multipliers = 1 144
+bantime.multipliers = 1 5 60 1440
 bantime.maxtime     = 24h
 
 [sshd]
@@ -218,16 +250,20 @@ EOF
 sudo systemctl enable --now fail2ban
 sudo systemctl restart fail2ban
 
-# Firewall: rate-limit SSH, allow 443 from anywhere. Source-IP filtering
-# for 443 is not enforced here — Docker publishes haproxy directly via
-# iptables and bypasses UFW on the FORWARD chain, so any UFW rule on 443
-# would be cosmetic. CF-only restriction, if desired, belongs at a
-# different layer (e.g. Cloudflare Tunnel or DOCKER-USER rules).
+# Firewall: UFW only governs *host* services. There is deliberately no rule for
+# 443 — haproxy runs in Docker, which publishes ports by inserting rules into the
+# iptables DOCKER/FORWARD chains that are evaluated before UFW's input chain. A
+# `ufw allow 443` would therefore be cosmetic (it gates nothing), and a `deny`
+# wouldn't actually block container traffic either. Real source-IP filtering for
+# 443 (e.g. Cloudflare-only) belongs in the DOCKER-USER chain or upstream at
+# Cloudflare — not here. So UFW protects exactly the host listeners: SSH (and
+# mosh if installed).
 sudo ufw --force reset
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
-sudo ufw limit 22/tcp comment 'key-only + fail2ban-guarded'
-sudo ufw allow 443/tcp comment 'https'
+sudo ufw limit 22/tcp comment 'ssh: rate-limited + fail2ban-guarded'
+# mosh uses a UDP port range for its session; only opened if mosh was installed.
+[ "$INSTALL_MOSH" = "yes" ] && sudo ufw allow 60000:61000/udp comment 'mosh'
 sudo ufw --force enable
 
 echo "Done on Ubuntu $UBUNTU_VERSION. Verify with:"
