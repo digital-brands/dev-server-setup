@@ -1,67 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# ---------------------------------------------------------------------------
-# Terminal UI helpers. Pure bash + ANSI — no deps. Color/glyphs are enabled
-# only on a real terminal and honour NO_COLOR; everything degrades to plain
-# ASCII text otherwise so logs and the DO web Console stay readable.
-# ---------------------------------------------------------------------------
-if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
-    C_RESET=$'\e[0m'; C_DIM=$'\e[2m'; C_BOLD=$'\e[1m'
-    C_ACCENT=$'\e[38;5;39m'   # calm cyan-blue
-    C_OK=$'\e[38;5;42m'       # green
-    C_WARN=$'\e[38;5;214m'    # amber
-    C_ERR=$'\e[38;5;203m'     # red
-    G_OK="✓"; G_ARROW="›"; G_WARN="!"; G_DOT="•"
-else
-    C_RESET=""; C_DIM=""; C_BOLD=""; C_ACCENT=""; C_OK=""; C_WARN=""; C_ERR=""
-    G_OK="[ok]"; G_ARROW=">"; G_WARN="[!]"; G_DOT="-"
-fi
-
-# A titled rule introducing a phase.
-section() { printf '\n%s%s── %s%s %s\n' "$C_ACCENT" "$C_BOLD" "$1" "$C_RESET" \
-    "${C_ACCENT}$(printf '─%.0s' $(seq 1 $((48 - ${#1}))))${C_RESET}"; }
-step()  { printf '  %s%s%s %s\n' "$C_ACCENT" "$G_ARROW" "$C_RESET" "$1"; }
-ok()    { printf '  %s%s%s %s\n' "$C_OK" "$G_OK" "$C_RESET" "$1"; }
-warn()  { printf '  %s%s %s%s\n' "$C_WARN" "$G_WARN" "$1" "$C_RESET"; }
-die()   { printf '\n%s%s %s%s\n' "$C_ERR" "$G_WARN" "$1" "$C_RESET" >&2; exit 1; }
-
-# ask "Prompt" [default] -> echoes the answer (default if blank).
-ask() {
-    local prompt="$1" default="${2:-}" reply hint=""
-    [ -n "$default" ] && hint=" ${C_DIM}[$default]${C_RESET}"
-    printf '  %s%s%s %s%s ' "$C_ACCENT" "$G_DOT" "$C_RESET" "$prompt" "$hint" >&2
-    read -r reply
-    printf '%s' "${reply:-$default}"
-}
-
-# ask_yn "Prompt" "y"|"n" (default) -> returns 0 for yes, 1 for no.
-ask_yn() {
-    local prompt="$1" default="${2:-n}" reply hint
-    case "$default" in y|Y) hint="[Y/n]";; *) hint="[y/N]";; esac
-    printf '  %s%s%s %s %s%s%s ' "$C_ACCENT" "$G_DOT" "$C_RESET" "$prompt" "$C_DIM" "$hint" "$C_RESET" >&2
-    read -r reply; reply="${reply:-$default}"
-    case "$reply" in [yY]|[yY][eE][sS]) return 0;; *) return 1;; esac
-}
-
-# menu "Prompt" opt1 opt2 ... -> echoes the chosen option string.
-menu() {
-    local prompt="$1"; shift
-    local opts=("$@") i choice
-    printf '  %s%s%s %s\n' "$C_ACCENT" "$G_DOT" "$C_RESET" "$prompt" >&2
-    for i in "${!opts[@]}"; do
-        printf '      %s%2d%s  %s\n' "$C_ACCENT" "$((i+1))" "$C_RESET" "${opts[$i]}" >&2
-    done
-    while true; do
-        printf '    %sselect 1-%d:%s ' "$C_DIM" "${#opts[@]}" "$C_RESET" >&2
-        read -r choice
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "${#opts[@]}" ]; then
-            printf '%s' "${opts[$((choice-1))]}"; return 0
-        fi
-        printf '    %senter a number 1-%d%s\n' "$C_WARN" "${#opts[@]}" "$C_RESET" >&2
-    done
-}
-
 # db-admin is a locked service identity for file ownership under /home/sites
 # (see usermod -s nologin below) — never a login.
 SERVICE_USER='db-admin'
@@ -72,63 +11,68 @@ GROUPS=('sudo' 'www-data' 'db-admin' 'docker')
 # authenticate). Bail early if there's no terminal rather than misbehaving
 # under `curl | bash`.
 if [ ! -t 0 ]; then
-    die "This script must be run interactively (needs a terminal — not 'curl | bash')."
+    echo "This script must be run interactively (needs a terminal)." >&2
+    exit 1
 fi
 
 # Refuse to run as the cloud-init 'ubuntu' account: this script deletes that
 # account (and pkills its processes) partway through, which would kill its own
 # session mid-run. Run as root or another sudo-capable user instead.
 if [ "$(id -un)" = "ubuntu" ]; then
-    die "Don't run this as the 'ubuntu' user — the script removes that account mid-run and would kill its own session. Log in as root and re-run."
+    echo "Don't run this as the 'ubuntu' user — the script removes that account" >&2
+    echo "mid-run and would kill its own session. Log in as root and re-run." >&2
+    exit 1
 fi
 
-# --- Welcome banner --------------------------------------------------------
-printf '\n%s%s' "$C_ACCENT" "$C_BOLD"
-cat <<'BANNER'
-  ╶──────────────────────────────────────────────╴
-     Digital Brands · Dev Server Setup
-  ╶──────────────────────────────────────────────╴
-BANNER
-printf '%s' "$C_RESET"
-printf '  %sProvisions Docker, accounts, and a hardened SSH/firewall baseline.%s\n' "$C_DIM" "$C_RESET"
-printf '  %sA few questions first, then it runs unattended.%s\n' "$C_DIM" "$C_RESET"
-
-# --- Collected up front; the rest runs unattended -------------------------
-section "Account"
-LOGIN_USER="$(ask 'Username for your login account:')"
+# --- Login user + auth method (collected up front; the rest runs unattended) ---
+read -rp "Username for your login account: " LOGIN_USER
 if ! [[ "$LOGIN_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-    die "Invalid username '$LOGIN_USER'."
+    echo "Invalid username '$LOGIN_USER'." >&2
+    exit 1
 fi
 
-AUTH_METHOD="$(menu "How should $LOGIN_USER authenticate over SSH?" "ssh-key" "password")"
+echo "How should $LOGIN_USER authenticate over SSH?"
+PS3="Select auth method (number): "
+select AUTH_METHOD in "ssh-key" "password"; do
+    [ -n "${AUTH_METHOD:-}" ] && break
+    echo "Enter 1 or 2."
+done
+[ -n "${AUTH_METHOD:-}" ] || { echo "No method selected." >&2; exit 1; }
 
 PUBKEY=""
 if [ "$AUTH_METHOD" = "ssh-key" ]; then
     # Key-only: password auth gets disabled in sshd below. Capture the public
     # key now so we don't harden ourselves out of the box.
     PASSWORD_AUTH="no"
-    step "Paste $LOGIN_USER's PUBLIC key (one line, e.g. 'ssh-ed25519 AAAA... comment'):"
+    echo "Paste the PUBLIC key for $LOGIN_USER (one line, e.g. 'ssh-ed25519 AAAA... comment'):"
     read -r PUBKEY
-    [ -n "$PUBKEY" ] || die "No key provided — refusing to enable key-only auth (would lock you out)."
+    if [ -z "$PUBKEY" ]; then
+        echo "No key provided — refusing to enable key-only auth (would lock you out)." >&2
+        exit 1
+    fi
 else
     PASSWORD_AUTH="yes"
 fi
 
-section "Options"
 # mosh is optional: it's a roaming/latency-tolerant SSH alternative but needs a
 # UDP port range opened in the firewall, so we only install it (and add the UFW
 # rule below) if asked for.
-if ask_yn "Install mosh (roaming SSH over UDP 60000-61000)?" n; then
-    INSTALL_MOSH="yes"; else INSTALL_MOSH="no"; fi
+read -rp "Install mosh (roaming SSH over UDP 60000-61000)? [y/N] " INSTALL_MOSH_REPLY
+case "$INSTALL_MOSH_REPLY" in
+    [yY]|[yY][eE][sS]) INSTALL_MOSH="yes" ;;
+    *)                 INSTALL_MOSH="no"  ;;
+esac
 
 # nvm is per-user node version management (installs into the login user's
 # ~/.nvm and hooks their shell). We deliberately do NOT install the apt `npm`
 # package — node is nvm-managed for the user to avoid version confusion. Decline
 # only if you don't need node on this box at all.
-if ask_yn "Install nvm (per-user node) for $LOGIN_USER?" y; then
-    INSTALL_NVM="yes"; else INSTALL_NVM="no"; fi
+read -rp "Install nvm (node version manager) for $LOGIN_USER? [Y/n] " INSTALL_NVM_REPLY
+case "$INSTALL_NVM_REPLY" in
+    [nN]|[nN][oO]) INSTALL_NVM="no"  ;;
+    *)             INSTALL_NVM="yes" ;;
+esac
 
-section "GitHub access"
 # GitHub authentication for the login user. Three supported paths:
 #   gh    - install the gh CLI; you run `gh auth login` yourself after first
 #           login (interactive browser/device flow, no token to paste here).
@@ -138,28 +82,23 @@ section "GitHub access"
 # This is also what decides whether gh gets installed (see TOOLS below).
 GIT_PAT=""
 GIT_PAT_USER=""
-GH_AUTH="$(menu "How should $LOGIN_USER authenticate to GitHub?" "gh" "token" "skip")"
+echo "How should $LOGIN_USER authenticate to GitHub?"
+PS3="Select GitHub auth (number): "
+select GH_AUTH in "gh" "token" "skip"; do
+    [ -n "${GH_AUTH:-}" ] && break
+    echo "Enter 1, 2, or 3."
+done
+[ -n "${GH_AUTH:-}" ] || GH_AUTH="skip"
 
 if [ "$GH_AUTH" = "token" ]; then
-    GIT_PAT_USER="$(ask 'GitHub username:')"
+    read -rp "GitHub username: " GIT_PAT_USER
     # -s: don't echo the token to the terminal.
-    printf '  %s%s%s GitHub Personal Access Token %s(hidden)%s: ' \
-        "$C_ACCENT" "$G_DOT" "$C_RESET" "$C_DIM" "$C_RESET"
-    read -rs GIT_PAT; echo
+    read -rsp "GitHub Personal Access Token (input hidden): " GIT_PAT; echo
     if [ -z "$GIT_PAT_USER" ] || [ -z "$GIT_PAT" ]; then
-        die "Username and token are both required for the token method."
+        echo "Username and token are both required for the token method." >&2
+        exit 1
     fi
 fi
-
-# --- Review before the unattended phase ------------------------------------
-section "Review"
-printf '  %s%-14s%s %s\n' "$C_DIM" "Login user" "$C_RESET" "$LOGIN_USER"
-printf '  %s%-14s%s %s\n' "$C_DIM" "SSH auth" "$C_RESET" "$AUTH_METHOD"
-printf '  %s%-14s%s %s\n' "$C_DIM" "mosh" "$C_RESET" "$INSTALL_MOSH"
-printf '  %s%-14s%s %s\n' "$C_DIM" "nvm" "$C_RESET" "$INSTALL_NVM"
-printf '  %s%-14s%s %s\n' "$C_DIM" "GitHub auth" "$C_RESET" "$GH_AUTH"
-echo
-ask_yn "Proceed with these settings?" y || die "Aborted — re-run to start over."
 
 TOOLS=(
     'git' 'htop' 'curl' 'vim' 'zsh' 'tmux' 'build-essential' 'certbot' 'direnv'
@@ -173,17 +112,13 @@ TOOLS=(
 # Detect Ubuntu codename
 UBUNTU_CODENAME=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
 UBUNTU_VERSION=$(. /etc/os-release && echo "$VERSION_ID")
-
-section "Packages"
-ok "Detected Ubuntu $UBUNTU_VERSION ($UBUNTU_CODENAME)"
+echo "Detected Ubuntu $UBUNTU_VERSION ($UBUNTU_CODENAME)"
 
 # Patch the base system, then install our tools. DEBIAN_FRONTEND=noninteractive
 # keeps the upgrade from prompting (service restarts, conf-file diffs) and
 # stalling the otherwise-unattended part of this run.
-step "Updating and patching the base system…"
 sudo apt-get update
 sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-step "Installing ${#TOOLS[@]} packages…"
 sudo apt-get install -y "${TOOLS[@]}"
 
 # Remove host packages that conflict with / are unwanted on a Docker host:
@@ -196,7 +131,6 @@ for pkg in snapd apache2 mysql-server; do
 done
 sudo apt-get autoremove --purge -y 2>/dev/null || true
 
-section "Docker"
 # Remove any conflicting Docker packages (safe no-op if not installed)
 for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
     sudo apt-get remove -y "$pkg" 2>/dev/null || true
@@ -233,7 +167,6 @@ sudo curl -fL \
     -o /usr/local/bin/docker-compose
 sudo chmod +x /usr/local/bin/docker-compose
 
-section "Accounts"
 # Create groups (skip if they exist)
 for group in "${GROUPS[@]}"; do
     getent group "$group" >/dev/null || sudo groupadd "$group"
@@ -321,9 +254,8 @@ fi
 # Store the GitHub token for the login user, if the token method was chosen.
 # Mirrors the old git-set-credentials.sh but fixed: writes to the LOGIN user's
 # home, 0600, owned by them, and points git's `store` helper at the file. The
-# token is written via a heredoc into a root-run tee so it never lands in the
-# process list. Idempotent: the helper config and credentials file are rewritten
-# cleanly each run.
+# token is written via a root-run tee so it never lands in the process list.
+# Idempotent: the helper config and credentials file are rewritten cleanly.
 if [ "$GH_AUTH" = "token" ]; then
     cred_file="/home/$LOGIN_USER/.git-credentials"
     # URL-form credential line consumed by git's store helper.
@@ -366,7 +298,6 @@ if [ "$AUTH_METHOD" = "password" ]; then
     done
 fi
 
-section "Hardening"
 # SSH hardening drop-in. Named 01- so it loads before any other drop-in
 # (50-cloud-init, etc.) — sshd takes the FIRST value it sees per directive,
 # so loading hardening first means later files can't relax it.
@@ -374,7 +305,7 @@ section "Hardening"
 # start of this run (yes = password login, no = key-only). Pubkey auth stays
 # on via sshd's default regardless.
 sudo tee /etc/ssh/sshd_config.d/01-hardening.conf > /dev/null <<EOF
-# Managed by dev-server-setup-2026.sh — edit the script, re-run, don't hand-edit.
+# Managed by server-setup.sh — edit the script, re-run, don't hand-edit.
 
 # Authentication
 PermitRootLogin no
@@ -448,20 +379,15 @@ sudo ufw limit 22/tcp comment 'ssh: rate-limited + fail2ban-guarded'
 [ "$INSTALL_MOSH" = "yes" ] && sudo ufw allow 60000:61000/udp comment 'mosh'
 sudo ufw --force enable
 
-section "Done"
-ok "Provisioned on Ubuntu $UBUNTU_VERSION."
-printf '  %sVerify with:%s\n' "$C_DIM" "$C_RESET"
-printf '    docker --version\n'
-printf '    docker compose version\n'
-printf '    docker-compose version   %s# compose-switch shim%s\n' "$C_DIM" "$C_RESET"
-printf '    sudo ufw status\n'
+echo "Done on Ubuntu $UBUNTU_VERSION. Verify with:"
+echo "  docker --version"
+echo "  docker compose version"
+echo "  docker-compose version   # compose-switch shim"
+echo "  sudo ufw status"
 
 # Point the user at the next step for their chosen GitHub auth method.
 case "$GH_AUTH" in
-    gh)    step "GitHub: run 'gh auth login' (then 'gh auth setup-git') after you log in as $LOGIN_USER." ;;
-    token) ok   "GitHub: token stored for $LOGIN_USER — HTTPS clones will just work." ;;
-    skip)  warn "GitHub: no auth configured — set it up later with gh or a token." ;;
+    gh)    echo "GitHub: run 'gh auth login' (then 'gh auth setup-git') after you log in as $LOGIN_USER." ;;
+    token) echo "GitHub: token stored for $LOGIN_USER via git's credential helper — HTTPS clones will just work." ;;
+    skip)  echo "GitHub: no auth configured — set it up later with gh or a token." ;;
 esac
-
-# Reminder: don't burn the bridge until the new login is verified.
-warn "Before you disconnect root: confirm '$LOGIN_USER' can log in (new terminal). Root login is now disabled."
