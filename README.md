@@ -260,6 +260,11 @@ sudo certbot renew --dry-run
 
 ### 4. Database load (monsoon)
 
+Install necessary node_modules in `volumes/phpfpm/build/` or `volumes/phpfpm/gulp/`
+```
+cd volumes/phpfpm/gulp/ && npm install
+```
+
 "monsoon" pulls the **latest DB dump from S3** and loads it into the dockerized
 MySQL. The wrapper is `tasks/database-monsoon.sh`; the work is in
 `volumes/database/scripts/monsoon/monsoon.sh`. It **refuses to run when
