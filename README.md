@@ -141,9 +141,24 @@ not-obvious parts — DNS, TLS, the database load, and the cache warmer.
 ### Environment
 
 Set the site's variables before running any task. Host-wide values
-(`IS_PRODUCTION`, the site's home dir, `DOMAIN_DEV`, …) live in
-`/etc/environment`; per-site values live in the repo's own `.envrc`, which
-`direnv` loads on `cd`:
+(`IS_PRODUCTION`, the site's home dir, `DOMAIN_DEV`, …) live in `/etc/environment`; 
+
+Example `/etc/environment`:
+```
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin"
+BC_HOME_DIR="/home/sites/badcredit"
+CR_HOME_DIR="/home/sites/cardrates"
+DA_HOME_DIR="/home/sites/datingadvice"
+DN_HOME_DIR="/home/sites/datingnews"
+DB_HOME_DIR="/home/sites/digitalbrands"
+HA_HOME_DIR="/home/sites/hostingadvice"
+
+DOMAIN_DEV="dev.passprotect.me"
+DOMAIN_PRODUCTION="dev.passprotect.me"
+IS_PRODUCTION=false
+```
+
+per-site values live in the repo's own `.envrc`, which `direnv` loads on `cd`:
 
 ```
 cd /home/sites/<site>
