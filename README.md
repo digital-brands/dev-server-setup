@@ -265,6 +265,13 @@ Install necessary node_modules in `volumes/phpfpm/build/` or `volumes/phpfpm/gul
 cd volumes/phpfpm/gulp/ && npm install
 ```
 
+Bring the site up so mysql is running. 
+```
+./tasks/site-start
+```
+
+#### Run Monsoon
+
 "monsoon" pulls the **latest DB dump from S3** and loads it into the dockerized
 MySQL. The wrapper is `tasks/database-monsoon.sh`; the work is in
 `volumes/database/scripts/monsoon/monsoon.sh`. It **refuses to run when
@@ -306,6 +313,8 @@ The warmer is a standalone Node app (its own git repo) checked out at the site's
 `warmer/` directory; it crawls the site's sitemaps to prime Varnish/Cloudflare
 caches. `tasks/warmer-run.sh` builds sitemaps, purges Varnish, runs it, then
 purges Cloudflare's HTML cache.
+
+`cd /home/sites/<site> && git clone https://github.com/digital-brands/warmer`
 
 First-time setup — populate its `node_modules` on the host:
 
