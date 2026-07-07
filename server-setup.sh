@@ -98,7 +98,7 @@ fi
 TOOLS=(
     'git' 'htop' 'curl' 'vim' 'zsh' 'tmux' 'build-essential' 'certbot' 'direnv'
     'python3-certbot-dns-cloudflare'
-    'ca-certificates' 'gnupg' 'ufw' 'fail2ban'
+    'ca-certificates' 'gnupg' 'ufw' 'fail2ban' 'npm' 'tig'
 )
 [ "$INSTALL_MOSH" = "yes" ] && TOOLS+=('mosh')
 # gh is only needed for the interactive `gh auth login` path.
