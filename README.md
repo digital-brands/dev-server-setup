@@ -307,7 +307,7 @@ so WordPress doesn't bounce you to production, and creates a read-only MySQL
 user for the Claude Code MCP. The AWS CLI runs **inside the database container**,
 so its credentials come from the container's env — not your host `~/.aws`.
 
-### 5. Cache warmer
+### 5. Warmer (optional on dev)
 
 The warmer is a standalone Node app (its own git repo) checked out at the site's
 `warmer/` directory; it crawls the site's sitemaps to prime Varnish/Cloudflare
