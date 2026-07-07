@@ -341,11 +341,13 @@ On dev it authenticates through basic-auth (`AUTH_USER`/`AUTH_PASS` from
 
 ### 6. Bring the site up
 
+Stop the site if it is still running from before, then restart so it can build with a full database.
+
 ```
 cd /home/sites/<site>
-direnv allow                 # if you haven't already this session
-./tasks/permissions-set.sh   # normalize ownership/permissions
-./tasks/site-start.sh        # docker-compose up -d (+ gulp asset build on dev)
+direnv allow                     # if you haven't already this session
+./tasks/permissions-set.sh       # normalize ownership/permissions
+./tasks/site-start.sh --nodebug  # docker-compose up -d (+ gulp asset build on dev)
 ```
 
 Once containers are up, haproxy is serving 443 with the `development.pem` you
@@ -354,26 +356,13 @@ assembled in step 3. Sanity checks:
 ```
 docker compose ps
 curl -kI https://<dev-host>/    # expect a response from haproxy
+
+example:
+curl -kI https://dev.passprotect.me/
 ```
 
-> The optional **aliases** file some sites ship can be symlinked into
-> `/etc/profile.d/` to load its shortcuts globally (re-login to pick them up).
-
-### Order of operations (quick reference)
-
+Visit the site in the browser to confirm.
 ```
-server-setup.sh (done) → log in as your user
-1. <command>
-2. <command>
-3. <command>
-4. <command>
-5. <command>
-6. <command>
-7. <command>
-8. <command>
-9. <command>
+example:
+https://dev.passprotect.me/
 ```
-
-Tasks live in each site repo's `tasks/` directory; per-site paths and flags
-vary, so check the repo when something differs from the above.
-
