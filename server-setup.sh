@@ -213,6 +213,22 @@ for rc in .zshrc .bashrc; do
     sudo chown "$LOGIN_USER:$LOGIN_USER" "$rc_path"
 done
 
+# Also hook direnv SYSTEM-WIDE. The per-user block above only covers the login
+# user created by this run — a dev account added later (or one whose dotfiles
+# replace ~/.zshrc without the hook) silently loses .envrc loading, and site
+# task scripts then run without their env vars. /etc/zsh/zshrc and
+# /etc/bash.bashrc are sourced by EVERY interactive shell before the user's own
+# rc, so this can't be skipped by personal dotfiles. Guarded on direnv existing
+# so shells never error if the package is ever removed. Idempotent.
+for sysrc in "/etc/zsh/zshrc:zsh" "/etc/bash.bashrc:bash"; do
+    rc_path="${sysrc%%:*}"; shell="${sysrc##*:}"
+    sudo touch "$rc_path"
+    if ! sudo grep -qF "direnv hook $shell" "$rc_path"; then
+        printf '\n# direnv: load per-directory .envrc files (managed by server-setup.sh)\ncommand -v direnv >/dev/null && eval "$(direnv hook %s)"\n' "$shell" \
+            | sudo tee -a "$rc_path" >/dev/null
+    fi
+done
+
 # Store the GitHub token for the login user, if the token method was chosen.
 # Mirrors the old git-set-credentials.sh but fixed: writes to the LOGIN user's
 # home, 0600, owned by them, and points git's `store` helper at the file. The

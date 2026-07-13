@@ -67,6 +67,11 @@ Everything after the prompts runs unattended.
   removed.
 - **`/home/sites`** — created group-writable (`2775`, setgid) and owned by
   `db-admin` so new site dirs inherit the right group.
+- **direnv hook** — added to the login user's `~/.zshrc`/`~/.bashrc` *and*
+  system-wide in `/etc/zsh/zshrc` and `/etc/bash.bashrc`, so `.envrc` loading
+  works for every account — including devs added after setup or devs whose own
+  dotfiles replace `~/.zshrc`. (Each dev still runs `direnv allow` once per
+  site; allow-lists are per-user.)
 
 ### Security hardening
 
